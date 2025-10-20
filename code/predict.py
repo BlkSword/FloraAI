@@ -56,7 +56,11 @@ def predict_with_model(model, test_loader, device, idx_to_class):
             confidences, predicted_indices = torch.max(probabilities, 1)
             
             # 转换为类别ID
-            predicted_classes = [idx_to_class[idx.item()] for idx in predicted_indices]
+            if len(idx_to_class) > 0:
+                predicted_classes = [idx_to_class[idx.item()] for idx in predicted_indices]
+            else:
+                # 如果idx_to_class为空，则直接使用索引作为类别ID
+                predicted_classes = [idx.item() for idx in predicted_indices]
             
             # 收集预测结果
             for filename, category_id, confidence in zip(filenames, predicted_classes, confidences):
@@ -129,7 +133,13 @@ def main():
     # 加载模型
     print("正在加载模型...")
     device = torch.device(args.device)
-    model = load_model(args.model_path, num_classes=len(idx_to_class), device=device)
+    
+    # 从配置文件中读取类别数量
+    with open(args.config_path, 'r') as f:
+        config = json.load(f)
+    num_classes = config.get('num_classes', len(idx_to_class))
+    
+    model = load_model(args.model_path, num_classes=num_classes, device=device)
     
     if model is None:
         print("错误: 模型加载失败")

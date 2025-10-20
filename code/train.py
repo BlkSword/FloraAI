@@ -52,9 +52,9 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch):
         # 打印进度
         if batch_idx % 50 == 0:
             print(f'Epoch: [{epoch}][{batch_idx}/{len(train_loader)}] '
-                  f'Loss: {losses.avg:.4f} '
-                  f'Acc@1: {top1.avg:.2f}% '
-                  f'Acc@5: {top5.avg:.2f}%')
+                f'Loss: {losses.avg:.4f} '
+                f'Acc@1: {top1.avg:.2f}% '
+                f'Acc@5: {top5.avg:.2f}%')
 
     return losses.avg, top1.avg.item()
 
@@ -139,9 +139,9 @@ def train_epoch_with_mixup(model, train_loader, criterion, optimizer, device, ep
         # 打印进度
         if batch_idx % 50 == 0:
             print(f'Epoch: [{epoch}][{batch_idx}/{len(train_loader)}] '
-                  f'Loss: {losses.avg:.4f} '
-                  f'Acc@1: {top1.avg:.2f}% '
-                  f'Acc@5: {top5.avg:.2f}%')
+                f'Loss: {losses.avg:.4f} '
+                f'Acc@1: {top1.avg:.2f}% '
+                f'Acc@5: {top5.avg:.2f}%')
 
     return losses.avg, top1.avg.item()
 
@@ -165,7 +165,7 @@ def main():
                         help='权重衰减')
     parser.add_argument('--img_size', type=int, default=300,
                         help='图像尺寸')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=8,
                         help='数据加载线程数')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
@@ -209,6 +209,17 @@ def main():
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"Number of classes: {len(class_to_idx)}")
+
+    # 读取训练CSV文件以获取类别名称信息
+    import pandas as pd
+    train_df = pd.read_csv(train_csv)
+    class_names = {}
+    for category_id in class_to_idx.keys():
+        category_data = train_df[train_df['category_id'] == category_id].iloc[0]
+        class_names[category_id] = {
+            'chinese_name': category_data['chinese_name'],
+            'english_name': category_data['english_name']
+        }
 
     # 创建模型
     print(f"Creating {args.model_type} model...")
@@ -293,12 +304,12 @@ def main():
         epoch_time = time.time() - start_time
 
         print(f'Epoch: [{epoch+1}/{args.epochs}] '
-              f'Train Loss: {train_loss:.4f} '
-              f'Train Acc: {train_acc:.2f}% '
-              f'Val Loss: {val_loss:.4f} '
-              f'Val Acc: {val_acc:.2f}% '
-              f'Time: {epoch_time:.1f}s '
-              f'LR: {scheduler.get_last_lr()[0]:.6f}')
+            f'Train Loss: {train_loss:.4f} '
+            f'Train Acc: {train_acc:.2f}% '
+            f'Val Loss: {val_loss:.4f} '
+            f'Val Acc: {val_acc:.2f}% '
+            f'Time: {epoch_time:.1f}s '
+            f'LR: {scheduler.get_last_lr()[0]:.6f}')
 
         # 保存最佳模型
         is_best = val_acc > best_acc
@@ -322,6 +333,17 @@ def main():
             torch.save(checkpoint, os.path.join(args.save_dir, 'best_model.pth'))
             print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
 
+        # 保存检查点
+        torch.save(checkpoint, os.path.join(args.save_dir, 'latest_checkpoint.pth'))
+
+        # 保存最佳模型
+        if is_best:
+            torch.save(checkpoint, os.path.join(args.save_dir, 'best_model.pth'))
+            print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+
+    # 所有训练完成后保存训练历史图表
+    plot_training_history(history, os.path.join(args.save_dir, 'training_history.png'))
+
     print(f'Training completed. Best validation accuracy: {best_acc:.2f}%')
 
     # 保存配置文件
@@ -330,13 +352,14 @@ def main():
         'num_classes': args.num_classes,
         'img_size': args.img_size,
         'class_to_idx': class_to_idx,
+        'class_names': class_names,  # 添加类别名称信息
         'best_accuracy': best_acc,
         'training_params': vars(args)
     }
     save_config(config, os.path.join(args.save_dir, 'config.json'))
 
     # 绘制训练历史
-    plot_training_history(history, os.path.join(args.save_dir, 'training_history.png'))
+    # plot_training_history(history, os.path.join(args.save_dir, 'training_history.png'))
 
     # 最终评估
     print("Final evaluation on test set...")

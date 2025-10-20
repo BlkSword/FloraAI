@@ -167,7 +167,7 @@ def get_transforms(phase='train', img_size=300):
 
 
 def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
-                       batch_size=32, num_workers=4, img_size=300):
+                    batch_size=32, num_workers=4, img_size=300):
     """创建数据加载器"""
 
     # 获取变换
@@ -247,8 +247,31 @@ def calculate_accuracy(outputs, targets, topk=(1, 5)):
 
 def save_config(config, save_path):
     """保存配置文件"""
+    # 确保所有键都是基本数据类型，而不是numpy类型
+    def convert_keys(data):
+        if isinstance(data, dict):
+            new_data = {}
+            for key, value in data.items():
+                # 转换numpy类型键为Python原生类型
+                if hasattr(key, 'item'):
+                    new_key = key.item()
+                else:
+                    new_key = key
+                
+                # 递归处理值
+                if isinstance(value, dict):
+                    new_data[new_key] = convert_keys(value)
+                elif isinstance(value, list):
+                    new_data[new_key] = [convert_keys(item) if isinstance(item, dict) else item for item in value]
+                else:
+                    new_data[new_key] = value
+            return new_data
+        return data
+    
+    converted_config = convert_keys(config)
+    
     with open(save_path, 'w') as f:
-        json.dump(config, f, indent=4)
+        json.dump(converted_config, f, indent=4, default=str)
 
 
 def load_config(config_path):
