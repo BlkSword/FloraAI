@@ -109,9 +109,10 @@ class UnlabeledDataset(Dataset):
 class AdvancedTransform:
     """高级数据增强变换"""
     
-    def __init__(self, img_size=300, phase='train'):
+    def __init__(self, img_size=300, phase='train', use_advanced_aug=True):
         self.img_size = img_size
         self.phase = phase
+        self.use_advanced_aug = use_advanced_aug
         
     def __call__(self, image):
         if self.phase == 'train':
@@ -129,18 +130,81 @@ class AdvancedTransform:
                 angle = random.uniform(-15, 15)
                 image = TF.rotate(image, angle)
                 
-            # 颜色抖动
-            if random.random() > 0.5:
-                image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
+            # 高级数据增强（如果启用）
+            if self.use_advanced_aug:
+                # 随机垂直翻转
+                if random.random() > 0.8:
+                    image = TF.vflip(image)
+                    
+                # 随机仿射变换
+                if random.random() > 0.7:
+                    angle = random.uniform(-10, 10)
+                    translate = (random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1))
+                    scale = random.uniform(0.9, 1.1)
+                    shear = random.uniform(-5, 5)
+                    image = TF.affine(image, angle=angle, translate=translate, scale=scale, shear=shear)
+                    
+                # 随机透视变换
+                if random.random() > 0.8:
+                    startpoints = [[0, 0], [self.img_size-1, 0], [self.img_size-1, self.img_size-1], [0, self.img_size-1]]
+                    endpoints = []
+                    for point in startpoints:
+                        endpoints.append([
+                            point[0] + random.uniform(-0.1, 0.1) * self.img_size,
+                            point[1] + random.uniform(-0.1, 0.1) * self.img_size
+                        ])
+                    image = TF.perspective(image, startpoints, endpoints)
+                    
+                # 随机弹性变换
+                if random.random() > 0.9:
+                    displacement = random.randint(-5, 5)
+                    image = TF.elastic_transform(image, displacement, displacement)
+                    
+                # 随机高斯模糊
+                if random.random() > 0.8:
+                    kernel_size = random.choice([3, 5, 7])
+                    image = TF.gaussian_blur(image, kernel_size)
+                    
+                # 随机锐化
+                if random.random() > 0.8:
+                    image = TF.adjust_sharpness(image, random.uniform(0.5, 2.0))
+                    
+                # 随机灰度化
+                if random.random() > 0.9:
+                    image = TF.to_grayscale(image, num_output_channels=3)
+                    
+                # 随机添加噪声
+                if random.random() > 0.9:
+                    image_tensor = TF.to_tensor(image)
+                    noise = torch.randn_like(image_tensor) * 0.05
+                    image_tensor = torch.clamp(image_tensor + noise, 0, 1)
+                    image = TF.to_pil_image(image_tensor)
+                    
+                # 随机擦除（Cutout）
+                if random.random() > 0.8:
+                    image_tensor = TF.to_tensor(image)
+                    h, w = image_tensor.shape[1], image_tensor.shape[2]
+                    erase_size = random.randint(int(h*0.1), int(h*0.3))
+                    i = random.randint(0, h - erase_size)
+                    j = random.randint(0, w - erase_size)
+                    image_tensor[:, i:i+erase_size, j:j+erase_size] = 0
+                    image = TF.to_pil_image(image_tensor)
+            
+            # 颜色抖动（增强版）
+            if random.random() > 0.3:
+                image = TF.adjust_brightness(image, random.uniform(0.7, 1.3))
+                
+            if random.random() > 0.3:
+                image = TF.adjust_contrast(image, random.uniform(0.7, 1.3))
+                
+            if random.random() > 0.3:
+                image = TF.adjust_saturation(image, random.uniform(0.7, 1.3))
+                
+            if random.random() > 0.3:
+                image = TF.adjust_hue(image, random.uniform(-0.2, 0.2))
                 
             if random.random() > 0.5:
-                image = TF.adjust_contrast(image, random.uniform(0.8, 1.2))
-                
-            if random.random() > 0.5:
-                image = TF.adjust_saturation(image, random.uniform(0.8, 1.2))
-                
-            if random.random() > 0.5:
-                image = TF.adjust_hue(image, random.uniform(-0.1, 0.1))
+                image = TF.adjust_gamma(image, random.uniform(0.8, 1.2))
                 
             # 转换为张量并标准化
             image = TF.to_tensor(image)
@@ -155,24 +219,24 @@ class AdvancedTransform:
             return image
 
 
-def get_transforms(phase='train', img_size=300):
+def get_transforms(phase='train', img_size=300, use_advanced_aug=True):
     """获取数据变换"""
     
     if phase == 'train':
-        transform = AdvancedTransform(img_size=img_size, phase='train')
+        transform = AdvancedTransform(img_size=img_size, phase='train', use_advanced_aug=use_advanced_aug)
     else:  # val or test
-        transform = AdvancedTransform(img_size=img_size, phase='val')
+        transform = AdvancedTransform(img_size=img_size, phase='val', use_advanced_aug=False)
 
     return transform
 
 
 def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
-                    batch_size=32, num_workers=4, img_size=300):
+                    batch_size=32, num_workers=4, img_size=300, use_advanced_aug=True):
     """创建数据加载器"""
 
     # 获取变换
-    train_transform = get_transforms('train', img_size)
-    test_transform = get_transforms('test', img_size)
+    train_transform = get_transforms('train', img_size, use_advanced_aug=use_advanced_aug)
+    test_transform = get_transforms('test', img_size, use_advanced_aug=False)
 
     # 创建数据集
     train_dataset = FlowerDataset(train_csv, train_img_dir, train_transform)
@@ -184,7 +248,8 @@ def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True  # 丢弃最后一个不完整的批次，避免BatchNorm错误
     )
 
     test_loader = DataLoader(

@@ -1,15 +1,16 @@
 {
-    "model_type": "resnet50",
+    "model_type": "efficientnet_b3",
     "num_classes": 100,
-    "img_size": 224,
+    "img_size": 300,
     "class_to_idx": {},
     "best_accuracy": 0.0,
     "training_params": {
-        "batch_size": 32,
-        "epochs": 50,
+        "batch_size": 16,
+        "epochs": 100,
         "lr": 0.001,
         "weight_decay": 0.0001,
-        "seed": 42
+        "seed": 42,
+        "mixup_alpha": 0.2
     },
     "data_augmentation": {
         "random_crop": true,
@@ -20,11 +21,32 @@
             "contrast": 0.2,
             "saturation": 0.2,
             "hue": 0.1
+        },
+        "advanced_transforms": {
+            "resize_factor": 1.2,
+            "normalize_mean": [
+                0.485,
+                0.456,
+                0.406
+            ],
+            "normalize_std": [
+                0.229,
+                0.224,
+                0.225
+            ]
         }
     },
     "normalization": {
-        "mean": [0.485, 0.456, 0.406],
-        "std": [0.229, 0.224, 0.225]
+        "mean": [
+            0.485,
+            0.456,
+            0.406
+        ],
+        "std": [
+            0.229,
+            0.224,
+            0.225
+        ]
     },
-    "description": "ResNet-50 based flower classification model with 100 classes"
+    "description": "EfficientNet-B3 based flower classification model with 100 classes, using advanced data augmentation and mixup training"
 }

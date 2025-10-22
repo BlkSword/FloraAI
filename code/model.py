@@ -13,7 +13,7 @@ import torch.nn.functional as F
 class FlowerClassifier(nn.Module):
     """花卉分类器模型"""
 
-    def __init__(self, num_classes=100, pretrained=True, dropout=0.5):
+    def __init__(self, num_classes=100, pretrained=True, dropout=0.5, use_attention=True):
         super(FlowerClassifier, self).__init__()
 
         # 使用预训练的EfficientNet-B3作为backbone
@@ -27,39 +27,94 @@ class FlowerClassifier(nn.Module):
             # 获取EfficientNet-B3最后一层的输入特征数
             num_features = self.backbone._fc.in_features
             
-            # 替换最后的分类层
-            self.backbone._fc = nn.Sequential(
+            # 改进的分类头设计
+            self.classifier = nn.Sequential(
                 nn.Dropout(dropout),
-                nn.Linear(num_features, 512),
-                nn.ReLU(inplace=True),
+                nn.Linear(num_features, 1024),
+                nn.BatchNorm1d(1024),
+                nn.SiLU(inplace=True),  # 使用SiLU激活函数
                 nn.Dropout(dropout),
+                nn.Linear(1024, 512),
+                nn.BatchNorm1d(512),
+                nn.SiLU(inplace=True),
+                nn.Dropout(dropout * 0.5),
                 nn.Linear(512, num_classes)
             )
+            
+            # 注意力机制（可选）
+            self.use_attention = use_attention
+            if use_attention:
+                self.attention = nn.Sequential(
+                    nn.Linear(num_features, num_features // 16),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(num_features // 16, num_features),
+                    nn.Sigmoid()
+                )
+            
+            # 保存原始特征数
+            self.num_features = num_features
+            
         except ImportError:
             print("EfficientNet not available, falling back to ResNet-50")
             self.backbone = models.resnet50(pretrained=pretrained)
             num_features = self.backbone.fc.in_features
-            self.backbone.fc = nn.Sequential(
+            
+            # 改进的分类头设计
+            self.classifier = nn.Sequential(
                 nn.Dropout(dropout),
-                nn.Linear(num_features, 512),
-                nn.ReLU(inplace=True),
+                nn.Linear(num_features, 1024),
+                nn.BatchNorm1d(1024),
+                nn.SiLU(inplace=True),
                 nn.Dropout(dropout),
+                nn.Linear(1024, 512),
+                nn.BatchNorm1d(512),
+                nn.SiLU(inplace=True),
+                nn.Dropout(dropout * 0.5),
                 nn.Linear(512, num_classes)
             )
+            
+            self.use_attention = use_attention
+            if use_attention:
+                self.attention = nn.Sequential(
+                    nn.Linear(num_features, num_features // 16),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(num_features // 16, num_features),
+                    nn.Sigmoid()
+                )
+            
+            self.num_features = num_features
 
         self.num_classes = num_classes
 
     def forward(self, x):
         """前向传播"""
-        return self.backbone(x)
+        # 提取特征
+        features = self.backbone.extract_features(x)
+        
+        # 全局平均池化
+        features = F.adaptive_avg_pool2d(features, (1, 1))
+        features = torch.flatten(features, 1)
+        
+        # 应用注意力机制（如果启用）
+        if self.use_attention:
+            attention_weights = self.attention(features)
+            features = features * attention_weights
+        
+        # 分类
+        output = self.classifier(features)
+        return output
 
     def extract_features(self, x):
         """提取特征向量（不包含最后的分类层）"""
-        # 对于EfficientNet，我们可以使用除最后一层外的所有层提取特征
-        features = nn.Sequential(*list(self.backbone.children())[:-1])
-        x = features(x)
-        x = torch.flatten(x, 1)
-        return x
+        features = self.backbone.extract_features(x)
+        features = F.adaptive_avg_pool2d(features, (1, 1))
+        features = torch.flatten(features, 1)
+        
+        if self.use_attention:
+            attention_weights = self.attention(features)
+            features = features * attention_weights
+            
+        return features
 
 
 class EnsembleModel(nn.Module):
@@ -82,23 +137,38 @@ class EnsembleModel(nn.Module):
         return ensemble_output
 
 
-def create_model(num_classes=100, model_type='efficientnet_b3', pretrained=True):
+def create_model(num_classes=100, model_type='efficientnet_b3', pretrained=True, dropout=0.5, use_attention=True):
     """创建模型的工厂函数"""
 
     if model_type == 'resnet50':
         model = FlowerClassifier(
             num_classes=num_classes,
             pretrained=pretrained,
-            dropout=0.5
+            dropout=dropout,
+            use_attention=use_attention
         )
     elif model_type == 'resnet101':
         model = models.resnet101(pretrained=pretrained)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        # 改进ResNet-101的分类头
+        num_features = model.fc.in_features
+        model.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(num_features, 1024),
+            nn.BatchNorm1d(1024),
+            nn.SiLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.SiLU(inplace=True),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(512, num_classes)
+        )
     elif model_type == 'efficientnet_b3':
         model = FlowerClassifier(
             num_classes=num_classes,
             pretrained=pretrained,
-            dropout=0.5
+            dropout=dropout,
+            use_attention=use_attention
         )
     elif model_type == 'efficientnet_b4':
         try:
@@ -109,7 +179,12 @@ def create_model(num_classes=100, model_type='efficientnet_b3', pretrained=True)
                 model = EfficientNet.from_name('efficientnet-b4', num_classes=num_classes)
         except ImportError:
             print("EfficientNet not available, falling back to ResNet-50")
-            model = FlowerClassifier(num_classes=num_classes, pretrained=pretrained)
+            model = FlowerClassifier(
+                num_classes=num_classes, 
+                pretrained=pretrained,
+                dropout=dropout,
+                use_attention=use_attention
+            )
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
