@@ -19,7 +19,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
+from torchvision.transforms import RandAugment, RandomErasing
+from timm.data.mixup import Mixup
+from timm.data.auto_augment import rand_augment_transform
+from torch.cuda.amp import autocast
+from contextlib import nullcontext
 
 
 class FlowerDataset(Dataset):
@@ -30,8 +34,8 @@ class FlowerDataset(Dataset):
         self.img_dir = img_dir
         self.transform = transform
 
-        # 创建类别ID到索引的映射
-        unique_categories = sorted(self.data['category_id'].unique())
+        # 创建类别ID到索引的映射（统一为Python原生int，避免JSON序列化问题）
+        unique_categories = sorted(int(cat_id) for cat_id in self.data['category_id'].unique())
         self.class_to_idx = {cat_id: idx for idx, cat_id in enumerate(unique_categories)}
         self.idx_to_class = {idx: cat_id for cat_id, idx in self.class_to_idx.items()}
 
@@ -56,8 +60,8 @@ class FlowerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        # 获取标签索引
-        category_id = row['category_id']
+        # 获取标签索引（确保为Python原生int）
+        category_id = int(row['category_id'])
         label = self.class_to_idx[category_id]
 
         return image, label, row['filename']
@@ -106,141 +110,74 @@ class UnlabeledDataset(Dataset):
         return image, filename
 
 
-class AdvancedTransform:
-    """高级数据增强变换"""
-    
-    def __init__(self, img_size=300, phase='train', use_advanced_aug=True):
-        self.img_size = img_size
-        self.phase = phase
-        self.use_advanced_aug = use_advanced_aug
-        
-    def __call__(self, image):
-        if self.phase == 'train':
-            # 随机调整大小和裁剪
-            image = TF.resize(image, (int(self.img_size * 1.2), int(self.img_size * 1.2)))
-            i, j, h, w = transforms.RandomCrop.get_params(image, output_size=(self.img_size, self.img_size))
-            image = TF.crop(image, i, j, h, w)
-            
-            # 随机水平翻转
-            if random.random() > 0.5:
-                image = TF.hflip(image)
-                
-            # 随机旋转
-            if random.random() > 0.5:
-                angle = random.uniform(-15, 15)
-                image = TF.rotate(image, angle)
-                
-            # 高级数据增强（如果启用）
-            if self.use_advanced_aug:
-                # 随机垂直翻转
-                if random.random() > 0.8:
-                    image = TF.vflip(image)
-                    
-                # 随机仿射变换
-                if random.random() > 0.7:
-                    angle = random.uniform(-10, 10)
-                    translate = (random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1))
-                    scale = random.uniform(0.9, 1.1)
-                    shear = random.uniform(-5, 5)
-                    image = TF.affine(image, angle=angle, translate=translate, scale=scale, shear=shear)
-                    
-                # 随机透视变换
-                if random.random() > 0.8:
-                    startpoints = [[0, 0], [self.img_size-1, 0], [self.img_size-1, self.img_size-1], [0, self.img_size-1]]
-                    endpoints = []
-                    for point in startpoints:
-                        endpoints.append([
-                            point[0] + random.uniform(-0.1, 0.1) * self.img_size,
-                            point[1] + random.uniform(-0.1, 0.1) * self.img_size
-                        ])
-                    image = TF.perspective(image, startpoints, endpoints)
-                    
-                # 随机弹性变换
-                if random.random() > 0.9:
-                    displacement = random.randint(-5, 5)
-                    image = TF.elastic_transform(image, displacement, displacement)
-                    
-                # 随机高斯模糊
-                if random.random() > 0.8:
-                    kernel_size = random.choice([3, 5, 7])
-                    image = TF.gaussian_blur(image, kernel_size)
-                    
-                # 随机锐化
-                if random.random() > 0.8:
-                    image = TF.adjust_sharpness(image, random.uniform(0.5, 2.0))
-                    
-                # 随机灰度化
-                if random.random() > 0.9:
-                    image = TF.to_grayscale(image, num_output_channels=3)
-                    
-                # 随机添加噪声
-                if random.random() > 0.9:
-                    image_tensor = TF.to_tensor(image)
-                    noise = torch.randn_like(image_tensor) * 0.05
-                    image_tensor = torch.clamp(image_tensor + noise, 0, 1)
-                    image = TF.to_pil_image(image_tensor)
-                    
-                # 随机擦除（Cutout）
-                if random.random() > 0.8:
-                    image_tensor = TF.to_tensor(image)
-                    h, w = image_tensor.shape[1], image_tensor.shape[2]
-                    erase_size = random.randint(int(h*0.1), int(h*0.3))
-                    i = random.randint(0, h - erase_size)
-                    j = random.randint(0, w - erase_size)
-                    image_tensor[:, i:i+erase_size, j:j+erase_size] = 0
-                    image = TF.to_pil_image(image_tensor)
-            
-            # 颜色抖动（增强版）
-            if random.random() > 0.3:
-                image = TF.adjust_brightness(image, random.uniform(0.7, 1.3))
-                
-            if random.random() > 0.3:
-                image = TF.adjust_contrast(image, random.uniform(0.7, 1.3))
-                
-            if random.random() > 0.3:
-                image = TF.adjust_saturation(image, random.uniform(0.7, 1.3))
-                
-            if random.random() > 0.3:
-                image = TF.adjust_hue(image, random.uniform(-0.2, 0.2))
-                
-            if random.random() > 0.5:
-                image = TF.adjust_gamma(image, random.uniform(0.8, 1.2))
-                
-            # 转换为张量并标准化
-            image = TF.to_tensor(image)
-            image = TF.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            
-            return image
-        else:
-            # 验证/测试阶段
-            image = TF.resize(image, (self.img_size, self.img_size))
-            image = TF.to_tensor(image)
-            image = TF.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            return image
+def get_transforms(phase='train', img_size=384, use_advanced_aug=True):
+    """获取数据变换，支持高级数据增强"""
 
-
-def get_transforms(phase='train', img_size=300, use_advanced_aug=True):
-    """获取数据变换"""
-    
     if phase == 'train':
-        transform = AdvancedTransform(img_size=img_size, phase='train', use_advanced_aug=use_advanced_aug)
+        if use_advanced_aug:
+            # 高级数据增强策略
+            transform = transforms.Compose([
+                transforms.Resize((img_size, img_size)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                # RandAugment数据增强
+                RandAugment(num_ops=2, magnitude=9),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                # Random Erasing数据增强
+                RandomErasing(p=0.25, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False)
+            ])
+        else:
+            # 基本数据增强
+            transform = transforms.Compose([
+                transforms.Resize((img_size + 32, img_size + 32)),
+                transforms.RandomCrop(img_size),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=15),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
     else:  # val or test
-        transform = AdvancedTransform(img_size=img_size, phase='val', use_advanced_aug=False)
+        transform = transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
     return transform
 
 
 def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
-                    batch_size=32, num_workers=4, img_size=300, use_advanced_aug=True):
-    """创建数据加载器"""
+                       batch_size=32, num_workers=4, img_size=384, use_advanced_aug=True,
+                       mixup_alpha=0.8, cutmix_alpha=1.0, label_smoothing=0.1):
+    """创建数据加载器，支持高级数据增强和混合策略"""
 
     # 获取变换
-    train_transform = get_transforms('train', img_size, use_advanced_aug=use_advanced_aug)
-    test_transform = get_transforms('test', img_size, use_advanced_aug=False)
+    train_transform = get_transforms('train', img_size, use_advanced_aug)
+    test_transform = get_transforms('test', img_size)
 
     # 创建数据集
     train_dataset = FlowerDataset(train_csv, train_img_dir, train_transform)
     test_dataset = FlowerDataset(test_csv, test_img_dir, test_transform)
+
+    # 创建Mixup和CutMix增强器
+    mixup_fn = None
+    if use_advanced_aug and (mixup_alpha > 0 or cutmix_alpha > 0):
+        mixup_fn = Mixup(
+            mixup_alpha=mixup_alpha,
+            cutmix_alpha=cutmix_alpha,
+            prob=1.0,
+            switch_prob=0.5,
+            mode='batch',
+            label_smoothing=label_smoothing,
+            num_classes=len(train_dataset.class_to_idx)
+        )
+        
+        # 当使用mixup时，确保batch size为偶数
+        # 通过设置drop_last=True来避免最后一个batch大小为奇数的情况
+        drop_last = True
+    else:
+        drop_last = False
 
     # 创建数据加载器
     train_loader = DataLoader(
@@ -249,7 +186,7 @@ def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True  # 丢弃最后一个不完整的批次，避免BatchNorm错误
+        drop_last=drop_last  # 当使用mixup时，丢弃最后一个不完整的batch
     )
 
     test_loader = DataLoader(
@@ -259,8 +196,8 @@ def create_data_loaders(train_csv, test_csv, train_img_dir, test_img_dir,
         num_workers=num_workers,
         pin_memory=True
     )
-
-    return train_loader, test_loader, train_dataset.class_to_idx
+    
+    return train_loader, test_loader, train_dataset.class_to_idx, mixup_fn
 
 
 def set_seed(seed=42):
@@ -293,6 +230,51 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
+class EMA:
+    """指数移动平均(Exponential Moving Average)模型权重"""
+    
+    def __init__(self, model, decay=0.9999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        self.register()
+
+    def register(self):
+        """注册EMA参数"""
+        for name, param in self.model.named_parameters():
+            # 仅在缺失时注册，避免覆盖已有的EMA平均值
+            if param.requires_grad and name not in self.shadow:
+                self.shadow[name] = param.data.clone()
+
+    def update(self):
+        """更新EMA参数"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                # 动态注册缺失的参数，避免阶段切换导致断言失败
+                if name not in self.shadow:
+                    self.shadow[name] = param.data.clone()
+                else:
+                    new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                    self.shadow[name] = new_average.clone()
+
+    def apply_shadow(self):
+        """应用EMA参数到模型"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+
+    def restore(self):
+        """恢复原始模型参数"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
+
+
 def calculate_accuracy(outputs, targets, topk=(1, 5)):
     """计算Top-K准确率"""
     with torch.no_grad():
@@ -312,31 +294,8 @@ def calculate_accuracy(outputs, targets, topk=(1, 5)):
 
 def save_config(config, save_path):
     """保存配置文件"""
-    # 确保所有键都是基本数据类型，而不是numpy类型
-    def convert_keys(data):
-        if isinstance(data, dict):
-            new_data = {}
-            for key, value in data.items():
-                # 转换numpy类型键为Python原生类型
-                if hasattr(key, 'item'):
-                    new_key = key.item()
-                else:
-                    new_key = key
-                
-                # 递归处理值
-                if isinstance(value, dict):
-                    new_data[new_key] = convert_keys(value)
-                elif isinstance(value, list):
-                    new_data[new_key] = [convert_keys(item) if isinstance(item, dict) else item for item in value]
-                else:
-                    new_data[new_key] = value
-            return new_data
-        return data
-    
-    converted_config = convert_keys(config)
-    
     with open(save_path, 'w') as f:
-        json.dump(converted_config, f, indent=4, default=str)
+        json.dump(config, f, indent=4)
 
 
 def load_config(config_path):
@@ -409,20 +368,73 @@ def visualize_predictions(model, dataset, device, class_to_idx, num_samples=8):
     plt.show()
 
 
-def evaluate_model(model, test_loader, device, class_to_idx):
-    """评估模型性能"""
+def tta_inference(model, image, device, num_augments=2):
+    """使用测试时增强(TTA)进行推理
+    
+    Args:
+        model: 模型
+        image: 输入图像张量 [C, H, W]
+        device: 设备
+        num_augments: 增强次数
+        
+    Returns:
+        平均预测结果
+    """
+    model.eval()
+    
+    # 原始图像预测
+    with torch.no_grad():
+        with amp_autocast(device):  # 使用FP16加速推理（仅 CUDA）
+            outputs = model(image.unsqueeze(0).to(device))
+    
+    # 水平翻转预测
+    if num_augments >= 2:
+        flip_transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=1.0),
+        ])
+        flipped_image = flip_transform(image).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            with amp_autocast(device):  # 使用FP16加速推理（仅 CUDA）
+                flip_outputs = model(flipped_image)
+        
+        # 合并预测结果
+        outputs = (outputs + flip_outputs) / 2.0
+    
+    return outputs
+
+
+def evaluate_model(model, test_loader, device, class_to_idx, use_tta=True, use_fp16=True):
+    """评估模型性能，支持TTA和FP16"""
     model.eval()
     all_preds = []
     all_labels = []
+    all_filenames = []
 
     with torch.no_grad():
-        for images, labels, _ in test_loader:
+        for images, labels, filenames in test_loader:
             images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
+            
+            if use_tta:
+                # 使用TTA进行推理
+                batch_outputs = []
+                for i in range(images.size(0)):
+                    outputs = tta_inference(model, images[i], device, num_augments=2)
+                    batch_outputs.append(outputs)
+                outputs = torch.cat(batch_outputs, dim=0)
+            else:
+                # 普通推理
+                if use_fp16 and getattr(device, 'type', 'cpu') == 'cuda':
+                    with autocast():
+                        outputs = model(images)
+                else:
+                    outputs = model(images)
+            
             _, predicted = torch.max(outputs, 1)
 
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            all_filenames.extend(filenames)
 
     # 计算准确率
     accuracy = accuracy_score(all_labels, all_preds)
@@ -436,8 +448,19 @@ def evaluate_model(model, test_loader, device, class_to_idx):
         target_names=target_names,
         output_dict=True
     )
+    
+    # 生成混淆矩阵
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    # 创建预测结果DataFrame
+    results_df = pd.DataFrame({
+        'filename': all_filenames,
+        'true_label': [idx_to_class[label] for label in all_labels],
+        'pred_label': [idx_to_class[pred] for pred in all_preds],
+        'correct': [1 if pred == label else 0 for pred, label in zip(all_preds, all_labels)]
+    })
 
-    return accuracy, report, all_preds, all_labels
+    return accuracy, report, cm, results_df
 
 
 if __name__ == "__main__":
@@ -454,3 +477,6 @@ if __name__ == "__main__":
     print("Transforms created successfully")
 
     print("Utility functions test completed!")
+def amp_autocast(device):
+    """在 CUDA 可用时启用 autocast，否则使用空上下文。"""
+    return autocast() if torch.cuda.is_available() and getattr(device, 'type', 'cpu') == 'cuda' else nullcontext()

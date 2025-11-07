@@ -7,199 +7,194 @@
 
 示例:
     python ./code/predict.py ./unified_flower_dataset/images/test ./results/submission.csv
-
-输出格式:
-    CSV文件包含三列: filename, category_id, confidence
-    - filename: 测试图片文件名
-    - category_id: 预测的类别ID (对应花卉类别编号)
-    - confidence: 预测置信度 (0-1之间)
 """
 
 import os
 import argparse
 import pandas as pd
 import torch
-from pathlib import Path
-import json
-
-from model import load_model
-from utils import UnlabeledDataset, set_seed
-import torchvision.transforms as transforms
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from pathlib import Path
+# from tqdm import tqdm  # 暂时禁用进度条输出
+import json
+import warnings
+from torch.cuda.amp import autocast
+
+# 屏蔽 pydantic 相关警告（如 UnsupportedFieldAttributeWarning）
+try:
+    from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
+    warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
+except Exception:
+    warnings.filterwarnings("ignore", module=r"pydantic.*")
+
+# 导入自定义模块
+from model import load_model
+from utils import UnlabeledDataset, tta_inference, get_transforms
 
 
-def load_class_mapping(config_path):
-    """加载类别映射"""
+def get_image_files(img_dir, img_extensions=None):
+    """获取目录中的所有图片文件"""
+    if img_extensions is None:
+        img_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']
+
+    img_dir_path = Path(img_dir)
+    image_files = []
+
+    # 获取所有图片文件
+    for ext in img_extensions:
+        image_files.extend(img_dir_path.glob(f'*{ext}'))
+        image_files.extend(img_dir_path.glob(f'*{ext.upper()}'))
+
+    # 只保留文件名，并排序确保一致性
+    image_files = sorted([f.name for f in image_files])
+
+    return image_files
+
+
+def load_config(config_path):
+    """加载模型配置"""
     with open(config_path, 'r') as f:
         config = json.load(f)
-    
-    class_to_idx = config.get('class_to_idx', {})
-    # 转换为idx_to_class映射
-    idx_to_class = {v: k for k, v in class_to_idx.items()}
-    return idx_to_class
+    return config
 
 
-def predict_with_model(model, test_loader, device, idx_to_class):
+def predict(model, dataloader, device, idx_to_class=None, use_tta=True, use_fp16=True):
     """使用模型进行预测"""
     model.eval()
     predictions = []
     
+    # 使用tqdm显示进度条
     with torch.no_grad():
-        for images, filenames in test_loader:
+        # for batch in tqdm(dataloader, desc="Predicting"):
+        for batch in dataloader:
+            images, file_names = batch
             images = images.to(device)
             
-            # 前向传播
-            outputs = model(images)
-            
-            # 计算概率
-            probabilities = F.softmax(outputs, dim=1)
-            confidences, predicted_indices = torch.max(probabilities, 1)
-            
-            # 转换为类别ID
-            if len(idx_to_class) > 0:
-                predicted_classes = [idx_to_class[idx.item()] for idx in predicted_indices]
+            if use_tta:
+                # 使用测试时增强：逐张进行TTA并拼接结果
+                batch_outputs = []
+                for i in range(images.size(0)):
+                    out = tta_inference(model, images[i], device)
+                    batch_outputs.append(out)
+                outputs = torch.cat(batch_outputs, dim=0)
             else:
-                # 如果idx_to_class为空，则直接使用索引作为类别ID
-                predicted_classes = [idx.item() for idx in predicted_indices]
+                # 不使用测试时增强（仅在 CUDA 上启用 AMP）
+                if use_fp16 and device.type == 'cuda':
+                    with autocast():
+                        outputs = model(images)
+                else:
+                    outputs = model(images)
             
-            # 收集预测结果
-            for filename, category_id, confidence in zip(filenames, predicted_classes, confidences):
+            # 获取预测结果
+            probs = F.softmax(outputs, dim=1)
+            confidences, class_ids = torch.max(probs, dim=1)
+            
+            # 将预测结果添加到列表中（索引到原始category_id的映射）
+            for i, file_name in enumerate(file_names):
+                pred_idx = class_ids[i].item()
+                mapped_id = idx_to_class[pred_idx] if idx_to_class is not None else pred_idx
                 predictions.append({
-                    'filename': filename,
-                    'category_id': int(category_id),
-                    'confidence': confidence.item()
+                    'filename': file_name,
+                    'category_id': mapped_id,
+                    'confidence': confidences[i].item()
                 })
     
     return predictions
 
 
 def main():
+    # 基于脚本位置的项目根目录
+    base_dir = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description='花卉分类模型预测')
-
-    # 位置参数：测试集文件夹和输出文件
-    parser.add_argument('test_img_dir', type=str,
-                        help='测试图片目录')
-    parser.add_argument('output_path', type=str,
-                        help='预测结果输出路径 (CSV文件)')
-
+    
+    # 位置参数 - 简化为只需要测试目录和输出路径
+    parser.add_argument('test_dir', type=str, help='测试图片目录')
+    parser.add_argument('output', type=str, help='预测结果输出路径 (CSV文件)')
+    
     # 可选参数
-    parser.add_argument('--model_path', type=str, default='../model/best_model.pth',
-                        help='训练好的模型路径')
-    parser.add_argument('--config_path', type=str, default='../model/config.json',
-                        help='模型配置文件路径')
-    parser.add_argument('--batch_size', type=int, default=16,
-                        help='批次大小')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='数据加载线程数')
-    parser.add_argument('--img_size', type=int, default=300,
-                        help='图像尺寸')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='随机种子（用于可重复性）')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='设备 (cuda/cpu)')
-
+    parser.add_argument('--model_path', type=str, default=str(base_dir / 'model' / 'best_model.pth'), help='模型路径')
+    parser.add_argument('--config_path', type=str, default=str(base_dir / 'model' / 'config.json'), help='配置文件路径')
+    parser.add_argument('--batch_size', type=int, default=16, help='批次大小')
+    parser.add_argument('--num_workers', type=int, default=4, help='数据加载线程数')
+    parser.add_argument('--use_tta', action='store_true', default=True, help='是否使用测试时增强')
+    parser.add_argument('--use_fp16', action='store_true', default=True, help='是否使用FP16混合精度')
+    
     args = parser.parse_args()
 
-    # 设置随机种子
-    set_seed(args.seed)
+    # 标准化为绝对路径，保证无论从哪里运行都能找到文件
+    args.model_path = str(Path(args.model_path).resolve())
+    args.config_path = str(Path(args.config_path).resolve())
 
-    print(f'测试集目录: {args.test_img_dir}')
-    print(f'输出文件: {args.output_path}')
-    print(f'模型路径: {args.model_path}')
-    print(f'设备: {args.device}')
-    print()
-
-    # 检查测试集目录是否存在
-    if not os.path.exists(args.test_img_dir):
-        print(f"错误: 测试集目录不存在: {args.test_img_dir}")
-        return
-
-    # 检查模型文件是否存在
-    if not os.path.exists(args.model_path):
-        print(f"错误: 模型文件不存在: {args.model_path}")
-        return
-
-    # 检查配置文件是否存在
     if not os.path.exists(args.config_path):
-        print(f"错误: 配置文件不存在: {args.config_path}")
-        return
+        raise FileNotFoundError(
+            f"配置文件未找到: {args.config_path}。请确认路径是否正确，或通过 --config_path 指定正确的配置文件路径。"
+        )
+    
+    # 检查CUDA是否可用
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # print(f"Using device: {device}")
 
-    # 加载类别映射
-    print("正在加载类别映射...")
-    idx_to_class = load_class_mapping(args.config_path)
-    print(f"加载了 {len(idx_to_class)} 个类别映射")
-    print()
-
-    # 加载模型
-    print("正在加载模型...")
-    device = torch.device(args.device)
+    # 加载配置
+    config = load_config(args.config_path)
+    model_type = config.get('model_type', 'convnext_base')
+    num_classes = config.get('num_classes', 102)
+    img_size = config.get('img_size', 384)
+    class_to_idx = config.get('class_to_idx', {})
+    idx_to_class = {int(v): int(k) for k, v in class_to_idx.items()} if class_to_idx else None
     
-    # 从配置文件中读取类别数量
-    with open(args.config_path, 'r') as f:
-        config = json.load(f)
-    num_classes = config.get('num_classes', len(idx_to_class))
+    # 创建模型
+    model = load_model(args.model_path, model_type=model_type, num_classes=num_classes, device=device)
+    model.to(device)
     
-    model = load_model(args.model_path, num_classes=num_classes, device=device)
-    
-    if model is None:
-        print("错误: 模型加载失败")
+    # 检查测试集目录是否存在
+    if not os.path.exists(args.test_dir):
+        # print(f"错误: 测试集目录不存在: {args.test_dir}")
         return
         
-    model.to(device)
-    model.eval()
-    print("模型加载成功")
-    print()
-
-    # 创建数据集和数据加载器
-    print("正在准备测试数据...")
-    # 简单的变换（与训练时的验证变换一致）
-    transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    # 获取测试图像文件
+    image_files = get_image_files(args.test_dir)
+    # print(f"找到 {len(image_files)} 个测试图像")
     
-    test_dataset = UnlabeledDataset(args.test_img_dir, transform=transform)
-    
-    if len(test_dataset) == 0:
-        print(f"错误: 在目录 {args.test_img_dir} 中未找到图片文件")
+    if not image_files:
+        # print(f"错误: 在目录 {args.test_dir} 中未找到图片文件")
         return
     
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
+    # 创建预测数据集和数据加载器
+    test_transform = get_transforms(phase='test', img_size=img_size)
+    dataset = UnlabeledDataset(args.test_dir, transform=test_transform)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
         num_workers=args.num_workers,
         pin_memory=True
     )
     
-    print(f"找到 {len(test_dataset)} 张图片")
-    print()
-
     # 进行预测
-    print("正在进行预测...")
-    predictions = predict_with_model(model, test_loader, device, idx_to_class)
-    print(f"完成预测 {len(predictions)} 张图片")
-    print()
-
-    # 创建 DataFrame
-    results_df = pd.DataFrame(predictions)
-
-    # 按照文件名排序
-    results_df = results_df.sort_values('filename').reset_index(drop=True)
-
+    predictions = predict(
+        model,
+        dataloader,
+        device,
+        idx_to_class=idx_to_class,
+        use_tta=args.use_tta,
+        use_fp16=args.use_fp16
+    )
+    
+    # 将预测结果转换为DataFrame
+    df = pd.DataFrame(predictions)
+    
     # 创建输出目录
-    output_dir = os.path.dirname(args.output_path)
+    output_dir = os.path.dirname(args.output)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-        print(f"创建输出目录: {output_dir}")
-
-    # 保存结果
-    results_df.to_csv(args.output_path, index=False)
-    print(f"预测结果已保存到: {args.output_path}")
-    print()   
-
-    print("预测完成!")
+        # print(f"创建输出目录: {output_dir}")
+    
+    # 保存预测结果
+    df.to_csv(args.output, index=False)
+    
+    # print(f"预测完成，结果已保存到 {args.output}")
+    # print(f"共预测 {len(predictions)} 个图像")
 
 
 if __name__ == '__main__':
