@@ -1,7 +1,7 @@
 {
-    "model_type": "convnext_base_timm",
+    "model_type": "tf_efficientnetv2_s_in21k_ft_in1k",
     "num_classes": 100,
-    "img_size": 448,
+    "img_size": 416,
     "class_to_idx": {
         "164": 0,
         "165": 1,
@@ -104,17 +104,17 @@
         "1827": 98,
         "1833": 99
     },
-    "best_accuracy": 98.05457305908203,
+    "best_accuracy": 96.9934310913086,
     "training_params": {
         "data_dir": "./unified_flower_dataset",
-        "model_type": "convnext_base_timm",
+        "model_type": "tf_efficientnetv2_s_in21k_ft_in1k",
         "num_classes": 100,
-        "batch_size": 16,
-        "epochs": 80,
-        "lr": 5e-05,
-        "min_lr": 5e-06,
-        "weight_decay": 0.0001,
-        "img_size": 448,
+        "batch_size": 64,
+        "epochs": 90,
+        "lr": 0.0002,
+        "min_lr": 2e-06,
+        "weight_decay": 0.02,
+        "img_size": 416,
         "num_workers": 4,
         "seed": 42,
         "save_dir": "./model",
@@ -124,8 +124,11 @@
         "ema_decay": 0.9999,
         "label_smoothing": 0.05,
         "mixup_alpha": 0.3,
-        "cutmix_alpha": 0.0,
+        "cutmix_alpha": 0.2,
         "use_advanced_aug": true,
-        "freeze_backbone_epochs": 15
+        "warmup_epochs": 5,
+        "freeze_backbone_epochs": 0,
+        "best_model_name": "best_model_v2.pth",
+        "config_name": "config_v2.json"
     }
 }

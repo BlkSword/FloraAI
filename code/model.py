@@ -19,13 +19,10 @@ class FlowerClassifier(nn.Module):
     def __init__(self, num_classes=100, pretrained=True, dropout=0.5):
         super(FlowerClassifier, self).__init__()
 
-        # 使用预训练的ResNet-50作为backbone
         self.backbone = models.resnet50(pretrained=pretrained)
 
-        # 获取ResNet-50最后一层的输入特征数
         num_features = self.backbone.fc.in_features
 
-        # 替换最后的分类层
         self.backbone.fc = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(num_features, 512),
@@ -121,6 +118,38 @@ def create_model(num_classes=100, model_type='convnext_base', pretrained=True):
             pretrained=pretrained,
             dropout=0.5
         )
+    elif model_type == 'efficientnetv2_s':  
+        model = timm.create_model(
+            'efficientnetv2_s',
+            pretrained=pretrained,
+            num_classes=num_classes
+        )
+    elif model_type.startswith('hf_hub:'):
+        model = timm.create_model(
+            model_type,
+            pretrained=pretrained,
+            num_classes=num_classes
+        )
+    elif model_type in ['tf_efficientnetv2_s_in21k_ft_in1k', 'tf_efficientnetv2_s.in21k_ft_in1k', 'tf_efficientnetv2_s_in21ft1k', 'tf_efficientnetv2_s.in21ft1k']:
+        try:
+            model = timm.create_model(
+                model_type,
+                pretrained=pretrained,
+                num_classes=num_classes
+            )
+        except RuntimeError:
+            try:
+                model = timm.create_model(
+                    'tf_efficientnetv2_s.in21k_ft_in1k',
+                    pretrained=pretrained,
+                    num_classes=num_classes
+                )
+            except RuntimeError:
+                model = timm.create_model(
+                    'tf_efficientnetv2_s_in21ft1k',
+                    pretrained=pretrained,
+                    num_classes=num_classes
+                )
     elif model_type == 'resnet101':
         model = models.resnet101(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
@@ -157,11 +186,26 @@ def load_model(model_path, model_type='convnext_base', num_classes=100, device='
 
         # 处理不同的保存格式
         if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
+            state_dict = checkpoint['model_state_dict']
         elif 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'])
+            state_dict = checkpoint['state_dict']
         else:
-            model.load_state_dict(checkpoint)
+            state_dict = checkpoint
+
+        # 处理模型权重键名不匹配问题
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            # 如果直接加载失败，尝试忽略不匹配的权重
+            model_dict = model.state_dict()
+            # 只加载匹配的权重
+            pretrained_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].size() == v.size()}
+            model_dict.update(pretrained_dict)
+            model.load_state_dict(model_dict)
+            if len(pretrained_dict) != len(state_dict):
+                print(f"Warning: Only loaded {len(pretrained_dict)}/{len(state_dict)} weights. Some weights were mismatched.")
+            else:
+                print(f"Model loaded successfully from {model_path}")
 
         model.to(device)
         model.eval()

@@ -17,6 +17,7 @@ import seaborn as sns
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from torchvision.transforms import RandAugment, RandomErasing
@@ -124,7 +125,7 @@ def get_transforms(phase='train', img_size=384, use_advanced_aug=True):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 # Random Erasing数据增强
-                RandomErasing(p=0.25, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False)
+                RandomErasing(p=0.35, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False)
             ])
         else:
             # 基本数据增强
@@ -386,7 +387,7 @@ def tta_inference(model, image, device, num_augments=2):
     with torch.no_grad():
         with amp_autocast(device):  # 使用FP16加速推理（仅 CUDA）
             outputs = model(image.unsqueeze(0).to(device))
-    
+
     # 水平翻转预测
     if num_augments >= 2:
         flip_transform = transforms.Compose([
@@ -404,6 +405,31 @@ def tta_inference(model, image, device, num_augments=2):
     return outputs
 
 
+def tta_inference_probs(model, image, device, num_augments=3):
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        with amp_autocast(device):
+            out = model(image.unsqueeze(0).to(device))
+        preds.append(F.softmax(out, dim=1))
+    if num_augments >= 2:
+        hflip = transforms.RandomHorizontalFlip(p=1.0)
+        img_hf = hflip(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            with amp_autocast(device):
+                out_hf = model(img_hf)
+        preds.append(F.softmax(out_hf, dim=1))
+    if num_augments >= 3:
+        vflip = transforms.RandomVerticalFlip(p=1.0)
+        img_vf = vflip(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            with amp_autocast(device):
+                out_vf = model(img_vf)
+        preds.append(F.softmax(out_vf, dim=1))
+    outputs = torch.stack(preds, dim=0).mean(dim=0)
+    return outputs
+
+
 def evaluate_model(model, test_loader, device, class_to_idx, use_tta=True, use_fp16=True):
     """评估模型性能，支持TTA和FP16"""
     model.eval()
@@ -416,10 +442,9 @@ def evaluate_model(model, test_loader, device, class_to_idx, use_tta=True, use_f
             images, labels = images.to(device), labels.to(device)
             
             if use_tta:
-                # 使用TTA进行推理
                 batch_outputs = []
                 for i in range(images.size(0)):
-                    outputs = tta_inference(model, images[i], device, num_augments=2)
+                    outputs = tta_inference_probs(model, images[i], device, num_augments=3)
                     batch_outputs.append(outputs)
                 outputs = torch.cat(batch_outputs, dim=0)
             else:
